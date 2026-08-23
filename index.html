@@ -162,6 +162,11 @@
     <div id="log"><div class="empty">Watching for profitable spreads...</div></div>
   </div>
 
+  <div class="card">
+    <h2>Debug</h2>
+    <div id="debug" style="font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); white-space: pre-wrap;">Starting...</div>
+  </div>
+
 <script>
   const PAIRS = ['BTC-USDT', 'ETH-USDT', 'ETH-BTC'];
   const book = {
@@ -255,17 +260,56 @@
     }
   }
 
+  const debugEl = document.getElementById('debug');
+  function debugLog(msg) {
+    const time = new Date().toLocaleTimeString();
+    debugEl.textContent = `[${time}] ${msg}\n` + debugEl.textContent;
+  }
+
+  async function getKucoinToken() {
+    const target = 'https://api.kucoin.com/api/v1/bullet-public';
+
+    // Attempt 1: direct fetch (works if KuCoin ever allows CORS)
+    try {
+      debugLog('Trying direct connection to KuCoin...');
+      const res = await fetch(target, { method: 'POST' });
+      const data = await res.json();
+      if (data && data.data) {
+        debugLog('Direct connection worked.');
+        return data.data;
+      }
+    } catch (err) {
+      debugLog('Direct connection blocked (likely CORS): ' + err.message);
+    }
+
+    // Attempt 2: via CORS proxy (server-to-server, not subject to browser CORS)
+    try {
+      debugLog('Retrying via CORS proxy...');
+      const proxied = 'https://corsproxy.io/?url=' + encodeURIComponent(target);
+      const res = await fetch(proxied, { method: 'POST' });
+      const data = await res.json();
+      if (data && data.data) {
+        debugLog('Proxy connection worked.');
+        return data.data;
+      }
+      throw new Error('Proxy returned unexpected response');
+    } catch (err) {
+      debugLog('Proxy attempt failed: ' + err.message);
+      throw err;
+    }
+  }
+
   async function connect() {
     setStatus(false, 'Connecting...');
     try {
-      const res = await fetch('https://api.kucoin.com/api/v1/bullet-public', { method: 'POST' });
-      const data = await res.json();
-      const { token, instanceServers } = data.data;
+      const { token, instanceServers } = await getKucoinToken();
       const wsUrl = `${instanceServers[0].endpoint}?token=${token}`;
+      debugLog('Got token, opening WebSocket...');
 
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
+        debugLog('WebSocket connected.');
         setStatus(true, 'Live');
         PAIRS.forEach((pair, i) => {
           ws.send(JSON.stringify({
@@ -295,15 +339,18 @@
       };
 
       ws.onclose = () => {
+        debugLog('WebSocket closed.');
         setStatus(false, 'Reconnecting...');
         clearInterval(pingInterval);
         setTimeout(connect, 5000);
       };
 
-      ws.onerror = () => {
+      ws.onerror = (e) => {
+        debugLog('WebSocket error.');
         setStatus(false, 'Connection error');
       };
     } catch (err) {
+      debugLog('Fatal: ' + err.message);
       setStatus(false, 'Failed to connect — retrying...');
       setTimeout(connect, 5000);
     }
