@@ -282,19 +282,19 @@
       debugLog('Direct connection blocked (likely CORS): ' + err.message);
     }
 
-    // Attempt 2: via CORS proxy (server-to-server, not subject to browser CORS)
+    // Attempt 2: our own Netlify serverless function (server-to-server,
+    // not subject to browser CORS at all — more reliable than public proxies)
     try {
-      debugLog('Retrying via CORS proxy...');
-      const proxied = 'https://corsproxy.io/?url=' + encodeURIComponent(target);
-      const res = await fetch(proxied, { method: 'POST' });
+      debugLog('Trying serverless proxy (/.netlify/functions/token)...');
+      const res = await fetch('/.netlify/functions/token', { method: 'POST' });
       const data = await res.json();
       if (data && data.data) {
-        debugLog('Proxy connection worked.');
+        debugLog('Serverless proxy worked.');
         return data.data;
       }
-      throw new Error('Proxy returned unexpected response');
+      throw new Error('Unexpected response: ' + JSON.stringify(data).slice(0, 100));
     } catch (err) {
-      debugLog('Proxy attempt failed: ' + err.message);
+      debugLog('Serverless proxy failed: ' + err.message);
       throw err;
     }
   }
