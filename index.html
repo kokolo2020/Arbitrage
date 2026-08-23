@@ -133,6 +133,11 @@
   </div>
 
   <div class="card">
+    <h2>Cross-Exchange Spread — Buy One, Sell Other (after fees, $1000 sim)</h2>
+    <div id="cross-table"><div class="empty">Waiting for data...</div></div>
+  </div>
+
+  <div class="card">
     <h2>Opportunity Log</h2>
     <div id="log"><div class="empty">Watching for profitable spreads...</div></div>
   </div>
@@ -148,11 +153,13 @@
   const coinCountInput = document.getElementById('coinCountInput');
   const logEl = document.getElementById('log');
   const tableEl = document.getElementById('table');
+  const crossTableEl = document.getElementById('cross-table');
   const debugEl = document.getElementById('debug');
 
   let logCount = 0;
   const book = {};              // "EXCHANGE|PAIR" -> { bid, ask }
   const triangleList = [];      // [{ exchange, coin }]
+  const allCoinsSet = new Set(['BTC']); // union of coins across all exchanges, for cross-exchange comparison
   const binanceSymbolMap = {};  // "BTCUSDT" -> { base, quote }
 
   function debugLog(source, msg) {
@@ -239,6 +246,58 @@
       }
     });
     buildTable();
+    checkCrossExchange();
+  }
+
+  // ---- Cross-exchange: same coin, buy on one exchange, sell on another ----
+  // Only 2 legs (not 3), and doesn't need a BTC hop at all — just the
+  // coin's own USDT pair on each exchange. Requires capital already sitting
+  // on both exchanges (no time to transfer mid-trade).
+  const EXCHANGES = ['KUCOIN', 'BINANCE', 'OKX'];
+
+  function calcCrossExchange(coin, fee) {
+    let best = null;
+    EXCHANGES.forEach(buyEx => {
+      EXCHANGES.forEach(sellEx => {
+        if (buyEx === sellEx) return;
+        const buyBook = book[bookKey(buyEx, `${coin}-USDT`)];
+        const sellBook = book[bookKey(sellEx, `${coin}-USDT`)];
+        if (!buyBook || !sellBook || !buyBook.ask || !sellBook.bid) return;
+        const usdt = 1000;
+        const coinAmt = (usdt / buyBook.ask) * (1 - fee);
+        const finalUsdt = coinAmt * sellBook.bid * (1 - fee);
+        const pct = ((finalUsdt - usdt) / usdt) * 100;
+        if (best === null || pct > best.pct) best = { pct, buyEx, sellEx, finalUsdt };
+      });
+    });
+    return best;
+  }
+
+  function checkCrossExchange() {
+    const fee = parseFloat(feeInput.value) / 100;
+    const threshold = parseFloat(thresholdInput.value);
+    const rows = [];
+    allCoinsSet.forEach(coin => {
+      const r = calcCrossExchange(coin, fee);
+      if (!r) return;
+      rows.push({ coin, ...r });
+      if (r.pct > threshold) {
+        addLogEntry(`CROSS ${coin}: buy ${r.buyEx} → sell ${r.sellEx}: ${r.pct.toFixed(4)}% → $${r.finalUsdt.toFixed(2)}`, true);
+      }
+    });
+
+    if (rows.length === 0) {
+      crossTableEl.innerHTML = '<div class="empty">Waiting for price data...</div>';
+      return;
+    }
+    rows.sort((a, b) => b.pct - a.pct);
+    crossTableEl.innerHTML = '';
+    rows.forEach(r => {
+      const div = document.createElement('div');
+      div.className = 'row';
+      div.innerHTML = `<span class="left"><span class="coin">${r.coin}</span><span class="exch">buy ${r.buyEx} → sell ${r.sellEx}</span></span><span class="best ${r.pct > 0 ? 'pos' : 'neg'}">${r.pct.toFixed(4)}%</span>`;
+      crossTableEl.appendChild(div);
+    });
   }
 
   function topN() {
@@ -274,6 +333,7 @@
     candidates.sort((a, b) => parseFloat(usdtMap[b].volValue || 0) - parseFloat(usdtMap[a].volValue || 0));
     const top = candidates.slice(0, topN());
     debugLog('KUCOIN', `Watching ${top.length} coins.`);
+    top.forEach(c => allCoinsSet.add(c));
     return top;
   }
 
@@ -356,6 +416,7 @@
     candidates.sort((a, b) => (volMap[`${b}USDT`] || 0) - (volMap[`${a}USDT`] || 0));
     const top = candidates.slice(0, topN());
     debugLog('BINANCE', `Watching ${top.length} coins.`);
+    top.forEach(c => allCoinsSet.add(c));
     return top;
   }
 
@@ -431,6 +492,7 @@
     candidates.sort((a, b) => parseFloat(usdtMap[b].volCcy24h || 0) - parseFloat(usdtMap[a].volCcy24h || 0));
     const top = candidates.slice(0, topN());
     debugLog('OKX', `Watching ${top.length} coins.`);
+    top.forEach(c => allCoinsSet.add(c));
     return top;
   }
 
