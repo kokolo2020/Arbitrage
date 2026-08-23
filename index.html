@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Arb Detector — KuCoin Triangular</title>
+<title>Arb Detector — Multi-Coin</title>
 <style>
   :root {
     --bg: #0b0f14;
@@ -25,15 +25,8 @@
     max-width: 480px;
     margin: 0 auto;
   }
-  h1 {
-    font-size: 18px;
-    margin: 0 0 4px;
-  }
-  .sub {
-    color: var(--muted);
-    font-size: 13px;
-    margin-bottom: 16px;
-  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
   .status {
     display: inline-flex;
     align-items: center;
@@ -45,12 +38,7 @@
     background: var(--panel);
     border: 1px solid var(--border);
   }
-  .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--red);
-  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); }
   .dot.on { background: var(--green); }
   .card {
     background: var(--panel);
@@ -66,27 +54,19 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .price-row {
-    display: flex;
-    justify-content: space-between;
-    font-size: 14px;
-    padding: 4px 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .price-row:last-child { border-bottom: none; }
-  .price-row span:first-child { color: var(--muted); }
-  .path {
+  .row {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 10px 0;
+    font-size: 14px;
+    padding: 8px 0;
     border-bottom: 1px solid var(--border);
   }
-  .path:last-child { border-bottom: none; }
-  .path .label { font-size: 13px; color: var(--muted); }
-  .path .pct { font-size: 16px; font-weight: 600; }
-  .pct.pos { color: var(--green); }
-  .pct.neg { color: var(--text); }
+  .row:last-child { border-bottom: none; }
+  .row .coin { color: var(--text); font-weight: 600; }
+  .row .best { font-size: 15px; font-weight: 600; }
+  .row .best.pos { color: var(--green); }
+  .row .best.neg { color: var(--muted); }
   .settings-row {
     display: flex;
     justify-content: space-between;
@@ -104,13 +84,14 @@
     text-align: right;
     font-size: 13px;
   }
-  #log {
+  #log, #debug {
     max-height: 220px;
     overflow-y: auto;
     font-family: ui-monospace, monospace;
     font-size: 11px;
     color: var(--muted);
     line-height: 1.6;
+    white-space: pre-wrap;
   }
   #log .opp { color: var(--green); }
   .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 12px 0; }
@@ -119,18 +100,11 @@
 <body>
 
   <h1>Triangular Arb Detector</h1>
-  <div class="sub">KuCoin · BTC / ETH / USDT · detection only, no trading</div>
+  <div class="sub" id="subtitle">KuCoin · scanning top coins · detection only</div>
 
   <div class="status">
     <div class="dot" id="statusDot"></div>
-    <span id="statusText">Connecting...</span>
-  </div>
-
-  <div class="card">
-    <h2>Live Prices</h2>
-    <div class="price-row"><span>BTC-USDT</span><span id="p-btcusdt">—</span></div>
-    <div class="price-row"><span>ETH-USDT</span><span id="p-ethusdt">—</span></div>
-    <div class="price-row"><span>ETH-BTC</span><span id="p-ethbtc">—</span></div>
+    <span id="statusText">Discovering coins...</span>
   </div>
 
   <div class="card">
@@ -143,18 +117,15 @@
       <span>Alert threshold (%)</span>
       <input type="number" id="thresholdInput" value="0.05" step="0.01">
     </div>
+    <div class="settings-row">
+      <span># of coins to scan</span>
+      <input type="number" id="coinCountInput" value="15" step="1" min="3" max="40">
+    </div>
   </div>
 
   <div class="card">
-    <h2>Current Spread (after fees, $1000 sim)</h2>
-    <div class="path">
-      <span class="label">USDT → BTC → ETH → USDT</span>
-      <span class="pct" id="pathA">—</span>
-    </div>
-    <div class="path">
-      <span class="label">USDT → ETH → BTC → USDT</span>
-      <span class="pct" id="pathB">—</span>
-    </div>
+    <h2>Best Spread Per Coin (via BTC, after fees, $1000 sim)</h2>
+    <div id="table"><div class="empty">Waiting for data...</div></div>
   </div>
 
   <div class="card">
@@ -164,66 +135,35 @@
 
   <div class="card">
     <h2>Debug</h2>
-    <div id="debug" style="font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); white-space: pre-wrap;">Starting...</div>
+    <div id="debug">Starting...</div>
   </div>
 
 <script>
-  const PAIRS = ['BTC-USDT', 'ETH-USDT', 'ETH-BTC'];
-  const book = {
-    'BTC-USDT': { bid: null, ask: null },
-    'ETH-USDT': { bid: null, ask: null },
-    'ETH-BTC': { bid: null, ask: null },
-  };
-
   const feeInput = document.getElementById('feeInput');
   const thresholdInput = document.getElementById('thresholdInput');
+  const coinCountInput = document.getElementById('coinCountInput');
   const logEl = document.getElementById('log');
+  const tableEl = document.getElementById('table');
+  const debugEl = document.getElementById('debug');
   const statusDot = document.getElementById('statusDot');
   const statusText = document.getElementById('statusText');
+  const subtitle = document.getElementById('subtitle');
 
   let logCount = 0;
   let ws = null;
   let pingInterval = null;
+  let coins = [];
+  let pairs = [];
+  const book = {};
+
+  function debugLog(msg) {
+    const time = new Date().toLocaleTimeString();
+    debugEl.textContent = `[${time}] ${msg}\n` + debugEl.textContent;
+  }
 
   function setStatus(connected, text) {
     statusDot.classList.toggle('on', connected);
     statusText.textContent = text;
-  }
-
-  function fmtPrice(p) {
-    return p ? p.bid && p.ask ? ((p.bid + p.ask) / 2).toFixed(2) : '—' : '—';
-  }
-
-  function updatePriceDisplay() {
-    document.getElementById('p-btcusdt').textContent = fmtPrice(book['BTC-USDT']);
-    document.getElementById('p-ethusdt').textContent = fmtPrice(book['ETH-USDT']);
-    document.getElementById('p-ethbtc').textContent = book['ETH-BTC'].bid ? ((book['ETH-BTC'].bid + book['ETH-BTC'].ask) / 2).toFixed(6) : '—';
-  }
-
-  function haveAllPrices() {
-    return Object.values(book).every(p => p.bid && p.ask);
-  }
-
-  function calcPathA(fee) {
-    const btcUsdt = book['BTC-USDT'].ask;
-    const ethBtc = book['ETH-BTC'].ask;
-    const ethUsdt = book['ETH-USDT'].bid;
-    let usdt = 1000;
-    let btc = (usdt / btcUsdt) * (1 - fee);
-    let eth = (btc / ethBtc) * (1 - fee);
-    let finalUsdt = (eth * ethUsdt) * (1 - fee);
-    return { finalUsdt, profitPct: ((finalUsdt - usdt) / usdt) * 100 };
-  }
-
-  function calcPathB(fee) {
-    const ethUsdt = book['ETH-USDT'].ask;
-    const ethBtc = book['ETH-BTC'].bid;
-    const btcUsdt = book['BTC-USDT'].bid;
-    let usdt = 1000;
-    let eth = (usdt / ethUsdt) * (1 - fee);
-    let btc = (eth * ethBtc) * (1 - fee);
-    let finalUsdt = (btc * btcUsdt) * (1 - fee);
-    return { finalUsdt, profitPct: ((finalUsdt - usdt) / usdt) * 100 };
   }
 
   function addLogEntry(text, isOpp) {
@@ -234,92 +174,144 @@
     div.textContent = `[${time}] ${text}`;
     logEl.prepend(div);
     logCount++;
-    while (logEl.children.length > 100) logEl.removeChild(logEl.lastChild);
+    while (logEl.children.length > 150) logEl.removeChild(logEl.lastChild);
   }
 
-  function checkArbitrage() {
-    if (!haveAllPrices()) return;
+  async function discoverCoins() {
+    debugLog('Fetching market data to discover coin list...');
+    const res = await fetch('/.netlify/functions/market-data');
+    const data = await res.json();
+    if (!data || !data.data || !data.data.ticker) throw new Error('Bad market-data response');
+
+    const usdtMap = {};
+    const btcMap = {};
+    data.data.ticker.forEach(t => {
+      if (!t.symbol) return;
+      if (t.symbol.endsWith('-USDT')) {
+        usdtMap[t.symbol.slice(0, -5)] = t;
+      } else if (t.symbol.endsWith('-BTC')) {
+        btcMap[t.symbol.slice(0, -4)] = t;
+      }
+    });
+
+    const candidates = Object.keys(usdtMap).filter(base => base !== 'BTC' && btcMap[base]);
+    candidates.sort((a, b) => parseFloat(usdtMap[b].volValue || 0) - parseFloat(usdtMap[a].volValue || 0));
+
+    const n = Math.max(3, Math.min(40, parseInt(coinCountInput.value) || 15));
+    const top = candidates.slice(0, n);
+    debugLog(`Found ${candidates.length} coins with both USDT+BTC markets, watching top ${top.length} by volume.`);
+    return top;
+  }
+
+  function buildTable() {
+    if (coins.length === 0) return;
+    tableEl.innerHTML = '';
+    const fee = parseFloat(feeInput.value) / 100;
+    const rows = coins.map(coin => {
+      const r = calcTriangle(coin, fee);
+      return { coin, ...r };
+    }).filter(r => r.best !== null);
+
+    rows.sort((a, b) => b.best - a.best);
+
+    if (rows.length === 0) {
+      tableEl.innerHTML = '<div class="empty">Waiting for price data...</div>';
+      return;
+    }
+
+    rows.forEach(r => {
+      const div = document.createElement('div');
+      div.className = 'row';
+      div.innerHTML = `<span class="coin">${r.coin}</span><span class="best ${r.best > 0 ? 'pos' : 'neg'}">${r.best.toFixed(4)}%</span>`;
+      tableEl.appendChild(div);
+    });
+  }
+
+  function calcTriangle(coin, fee) {
+    const btcUsdt = book['BTC-USDT'];
+    const coinUsdt = book[`${coin}-USDT`];
+    const coinBtc = book[`${coin}-BTC`];
+    if (!btcUsdt || !coinUsdt || !coinBtc) return { best: null };
+    if (!btcUsdt.bid || !coinUsdt.bid || !coinBtc.bid) return { best: null };
+
+    let usdt = 1000;
+    let btc = (usdt / btcUsdt.ask) * (1 - fee);
+    let coinAmt = (btc / coinBtc.ask) * (1 - fee);
+    let finalA = (coinAmt * coinUsdt.bid) * (1 - fee);
+    const pctA = ((finalA - usdt) / usdt) * 100;
+
+    usdt = 1000;
+    coinAmt = (usdt / coinUsdt.ask) * (1 - fee);
+    btc = (coinAmt * coinBtc.bid) * (1 - fee);
+    let finalB = (btc * btcUsdt.bid) * (1 - fee);
+    const pctB = ((finalB - usdt) / usdt) * 100;
+
+    return { pctA, pctB, best: Math.max(pctA, pctB), finalA, finalB };
+  }
+
+  function checkAllTriangles() {
     const fee = parseFloat(feeInput.value) / 100;
     const threshold = parseFloat(thresholdInput.value);
-
-    const pathA = calcPathA(fee);
-    const pathB = calcPathB(fee);
-
-    const elA = document.getElementById('pathA');
-    const elB = document.getElementById('pathB');
-    elA.textContent = pathA.profitPct.toFixed(4) + '%';
-    elA.className = 'pct ' + (pathA.profitPct > 0 ? 'pos' : 'neg');
-    elB.textContent = pathB.profitPct.toFixed(4) + '%';
-    elB.className = 'pct ' + (pathB.profitPct > 0 ? 'pos' : 'neg');
-
-    if (pathA.profitPct > threshold) {
-      addLogEntry(`OPPORTUNITY Path A (USDT→BTC→ETH→USDT): ${pathA.profitPct.toFixed(4)}% → $${pathA.finalUsdt.toFixed(2)}`, true);
-    }
-    if (pathB.profitPct > threshold) {
-      addLogEntry(`OPPORTUNITY Path B (USDT→ETH→BTC→USDT): ${pathB.profitPct.toFixed(4)}% → $${pathB.finalUsdt.toFixed(2)}`, true);
-    }
-  }
-
-  const debugEl = document.getElementById('debug');
-  function debugLog(msg) {
-    const time = new Date().toLocaleTimeString();
-    debugEl.textContent = `[${time}] ${msg}\n` + debugEl.textContent;
+    coins.forEach(coin => {
+      const r = calcTriangle(coin, fee);
+      if (r.best === null) return;
+      if (r.pctA > threshold) {
+        addLogEntry(`OPPORTUNITY ${coin} Path A (USDT→BTC→${coin}→USDT): ${r.pctA.toFixed(4)}% → $${r.finalA.toFixed(2)}`, true);
+      }
+      if (r.pctB > threshold) {
+        addLogEntry(`OPPORTUNITY ${coin} Path B (USDT→${coin}→BTC→USDT): ${r.pctB.toFixed(4)}% → $${r.finalB.toFixed(2)}`, true);
+      }
+    });
+    buildTable();
   }
 
   async function getKucoinToken() {
-    const target = 'https://api.kucoin.com/api/v1/bullet-public';
-
-    // Attempt 1: direct fetch (works if KuCoin ever allows CORS)
     try {
       debugLog('Trying direct connection to KuCoin...');
-      const res = await fetch(target, { method: 'POST' });
+      const res = await fetch('https://api.kucoin.com/api/v1/bullet-public', { method: 'POST' });
       const data = await res.json();
-      if (data && data.data) {
-        debugLog('Direct connection worked.');
-        return data.data;
-      }
+      if (data && data.data) { debugLog('Direct connection worked.'); return data.data; }
     } catch (err) {
-      debugLog('Direct connection blocked (likely CORS): ' + err.message);
+      debugLog('Direct blocked (CORS): ' + err.message);
     }
-
-    // Attempt 2: our own Netlify serverless function (server-to-server,
-    // not subject to browser CORS at all — more reliable than public proxies)
-    try {
-      debugLog('Trying serverless proxy (/.netlify/functions/token)...');
-      const res = await fetch('/.netlify/functions/token', { method: 'POST' });
-      const data = await res.json();
-      if (data && data.data) {
-        debugLog('Serverless proxy worked.');
-        return data.data;
-      }
-      throw new Error('Unexpected response: ' + JSON.stringify(data).slice(0, 100));
-    } catch (err) {
-      debugLog('Serverless proxy failed: ' + err.message);
-      throw err;
-    }
+    debugLog('Trying serverless proxy (/.netlify/functions/token)...');
+    const res = await fetch('/.netlify/functions/token', { method: 'POST' });
+    const data = await res.json();
+    if (data && data.data) { debugLog('Serverless proxy worked.'); return data.data; }
+    throw new Error('Unexpected token response: ' + JSON.stringify(data).slice(0, 100));
   }
 
   async function connect() {
     setStatus(false, 'Connecting...');
     try {
+      if (coins.length === 0) {
+        coins = await discoverCoins();
+        pairs = ['BTC-USDT'];
+        coins.forEach(c => { pairs.push(`${c}-USDT`); pairs.push(`${c}-BTC`); });
+        pairs.forEach(p => { book[p] = { bid: null, ask: null }; });
+        subtitle.textContent = `KuCoin · scanning ${coins.length} coins · detection only`;
+      }
+
       const { token, instanceServers } = await getKucoinToken();
       const wsUrl = `${instanceServers[0].endpoint}?token=${token}`;
-      debugLog('Got token, opening WebSocket...');
+      debugLog(`Got token, opening WebSocket for ${pairs.length} pairs...`);
 
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
         debugLog('WebSocket connected.');
         setStatus(true, 'Live');
-        PAIRS.forEach((pair, i) => {
+        const batchSize = 10;
+        for (let i = 0; i < pairs.length; i += batchSize) {
+          const batch = pairs.slice(i, i + batchSize);
           ws.send(JSON.stringify({
             id: Date.now() + i,
             type: 'subscribe',
-            topic: `/market/ticker:${pair}`,
+            topic: `/market/ticker:${batch.join(',')}`,
             privateChannel: false,
             response: true,
           }));
-        });
+        }
         pingInterval = setInterval(() => {
           if (ws.readyState === 1) ws.send(JSON.stringify({ id: Date.now(), type: 'ping' }));
         }, 20000);
@@ -333,8 +325,7 @@
         if (book[pair] && msg.data) {
           book[pair].bid = parseFloat(msg.data.bestBid);
           book[pair].ask = parseFloat(msg.data.bestAsk);
-          updatePriceDisplay();
-          checkArbitrage();
+          checkAllTriangles();
         }
       };
 
@@ -345,7 +336,7 @@
         setTimeout(connect, 5000);
       };
 
-      ws.onerror = (e) => {
+      ws.onerror = () => {
         debugLog('WebSocket error.');
         setStatus(false, 'Connection error');
       };
