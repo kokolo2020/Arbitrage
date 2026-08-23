@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Arb Detector — KuCoin Triangular</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #121821;
+    --border: #1f2937;
+    --text: #e5e7eb;
+    --muted: #8b98a9;
+    --green: #34d399;
+    --red: #f87171;
+    --accent: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 16px;
+    max-width: 480px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 18px;
+    margin: 0 0 4px;
+  }
+  .sub {
+    color: var(--muted);
+    font-size: 13px;
+    margin-bottom: 16px;
+  }
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    margin-bottom: 16px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+  }
+  .dot.on { background: var(--green); }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+  .card h2 {
+    font-size: 13px;
+    color: var(--muted);
+    margin: 0 0 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .price-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 14px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .price-row:last-child { border-bottom: none; }
+  .price-row span:first-child { color: var(--muted); }
+  .path {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .path:last-child { border-bottom: none; }
+  .path .label { font-size: 13px; color: var(--muted); }
+  .path .pct { font-size: 16px; font-weight: 600; }
+  .pct.pos { color: var(--green); }
+  .pct.neg { color: var(--text); }
+  .settings-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+    margin-bottom: 8px;
+  }
+  input {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 4px 8px;
+    width: 70px;
+    text-align: right;
+    font-size: 13px;
+  }
+  #log {
+    max-height: 220px;
+    overflow-y: auto;
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+  #log .opp { color: var(--green); }
+  .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 12px 0; }
+</style>
+</head>
+<body>
+
+  <h1>Triangular Arb Detector</h1>
+  <div class="sub">KuCoin · BTC / ETH / USDT · detection only, no trading</div>
+
+  <div class="status">
+    <div class="dot" id="statusDot"></div>
+    <span id="statusText">Connecting...</span>
+  </div>
+
+  <div class="card">
+    <h2>Live Prices</h2>
+    <div class="price-row"><span>BTC-USDT</span><span id="p-btcusdt">—</span></div>
+    <div class="price-row"><span>ETH-USDT</span><span id="p-ethusdt">—</span></div>
+    <div class="price-row"><span>ETH-BTC</span><span id="p-ethbtc">—</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Settings</h2>
+    <div class="settings-row">
+      <span>Taker fee per leg (%)</span>
+      <input type="number" id="feeInput" value="0.10" step="0.01">
+    </div>
+    <div class="settings-row">
+      <span>Alert threshold (%)</span>
+      <input type="number" id="thresholdInput" value="0.05" step="0.01">
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Current Spread (after fees, $1000 sim)</h2>
+    <div class="path">
+      <span class="label">USDT → BTC → ETH → USDT</span>
+      <span class="pct" id="pathA">—</span>
+    </div>
+    <div class="path">
+      <span class="label">USDT → ETH → BTC → USDT</span>
+      <span class="pct" id="pathB">—</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Opportunity Log</h2>
+    <div id="log"><div class="empty">Watching for profitable spreads...</div></div>
+  </div>
+
+<script>
+  const PAIRS = ['BTC-USDT', 'ETH-USDT', 'ETH-BTC'];
+  const book = {
+    'BTC-USDT': { bid: null, ask: null },
+    'ETH-USDT': { bid: null, ask: null },
+    'ETH-BTC': { bid: null, ask: null },
+  };
+
+  const feeInput = document.getElementById('feeInput');
+  const thresholdInput = document.getElementById('thresholdInput');
+  const logEl = document.getElementById('log');
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+
+  let logCount = 0;
+  let ws = null;
+  let pingInterval = null;
+
+  function setStatus(connected, text) {
+    statusDot.classList.toggle('on', connected);
+    statusText.textContent = text;
+  }
+
+  function fmtPrice(p) {
+    return p ? p.bid && p.ask ? ((p.bid + p.ask) / 2).toFixed(2) : '—' : '—';
+  }
+
+  function updatePriceDisplay() {
+    document.getElementById('p-btcusdt').textContent = fmtPrice(book['BTC-USDT']);
+    document.getElementById('p-ethusdt').textContent = fmtPrice(book['ETH-USDT']);
+    document.getElementById('p-ethbtc').textContent = book['ETH-BTC'].bid ? ((book['ETH-BTC'].bid + book['ETH-BTC'].ask) / 2).toFixed(6) : '—';
+  }
+
+  function haveAllPrices() {
+    return Object.values(book).every(p => p.bid && p.ask);
+  }
+
+  function calcPathA(fee) {
+    const btcUsdt = book['BTC-USDT'].ask;
+    const ethBtc = book['ETH-BTC'].ask;
+    const ethUsdt = book['ETH-USDT'].bid;
+    let usdt = 1000;
+    let btc = (usdt / btcUsdt) * (1 - fee);
+    let eth = (btc / ethBtc) * (1 - fee);
+    let finalUsdt = (eth * ethUsdt) * (1 - fee);
+    return { finalUsdt, profitPct: ((finalUsdt - usdt) / usdt) * 100 };
+  }
+
+  function calcPathB(fee) {
+    const ethUsdt = book['ETH-USDT'].ask;
+    const ethBtc = book['ETH-BTC'].bid;
+    const btcUsdt = book['BTC-USDT'].bid;
+    let usdt = 1000;
+    let eth = (usdt / ethUsdt) * (1 - fee);
+    let btc = (eth * ethBtc) * (1 - fee);
+    let finalUsdt = (btc * btcUsdt) * (1 - fee);
+    return { finalUsdt, profitPct: ((finalUsdt - usdt) / usdt) * 100 };
+  }
+
+  function addLogEntry(text, isOpp) {
+    if (logCount === 0) logEl.innerHTML = '';
+    const div = document.createElement('div');
+    if (isOpp) div.className = 'opp';
+    const time = new Date().toLocaleTimeString();
+    div.textContent = `[${time}] ${text}`;
+    logEl.prepend(div);
+    logCount++;
+    while (logEl.children.length > 100) logEl.removeChild(logEl.lastChild);
+  }
+
+  function checkArbitrage() {
+    if (!haveAllPrices()) return;
+    const fee = parseFloat(feeInput.value) / 100;
+    const threshold = parseFloat(thresholdInput.value);
+
+    const pathA = calcPathA(fee);
+    const pathB = calcPathB(fee);
+
+    const elA = document.getElementById('pathA');
+    const elB = document.getElementById('pathB');
+    elA.textContent = pathA.profitPct.toFixed(4) + '%';
+    elA.className = 'pct ' + (pathA.profitPct > 0 ? 'pos' : 'neg');
+    elB.textContent = pathB.profitPct.toFixed(4) + '%';
+    elB.className = 'pct ' + (pathB.profitPct > 0 ? 'pos' : 'neg');
+
+    if (pathA.profitPct > threshold) {
+      addLogEntry(`OPPORTUNITY Path A (USDT→BTC→ETH→USDT): ${pathA.profitPct.toFixed(4)}% → $${pathA.finalUsdt.toFixed(2)}`, true);
+    }
+    if (pathB.profitPct > threshold) {
+      addLogEntry(`OPPORTUNITY Path B (USDT→ETH→BTC→USDT): ${pathB.profitPct.toFixed(4)}% → $${pathB.finalUsdt.toFixed(2)}`, true);
+    }
+  }
+
+  async function connect() {
+    setStatus(false, 'Connecting...');
+    try {
+      const res = await fetch('https://api.kucoin.com/api/v1/bullet-public', { method: 'POST' });
+      const data = await res.json();
+      const { token, instanceServers } = data.data;
+      const wsUrl = `${instanceServers[0].endpoint}?token=${token}`;
+
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        setStatus(true, 'Live');
+        PAIRS.forEach((pair, i) => {
+          ws.send(JSON.stringify({
+            id: Date.now() + i,
+            type: 'subscribe',
+            topic: `/market/ticker:${pair}`,
+            privateChannel: false,
+            response: true,
+          }));
+        });
+        pingInterval = setInterval(() => {
+          if (ws.readyState === 1) ws.send(JSON.stringify({ id: Date.now(), type: 'ping' }));
+        }, 20000);
+      };
+
+      ws.onmessage = (event) => {
+        let msg;
+        try { msg = JSON.parse(event.data); } catch { return; }
+        if (msg.type !== 'message' || !msg.topic) return;
+        const pair = msg.topic.split(':')[1];
+        if (book[pair] && msg.data) {
+          book[pair].bid = parseFloat(msg.data.bestBid);
+          book[pair].ask = parseFloat(msg.data.bestAsk);
+          updatePriceDisplay();
+          checkArbitrage();
+        }
+      };
+
+      ws.onclose = () => {
+        setStatus(false, 'Reconnecting...');
+        clearInterval(pingInterval);
+        setTimeout(connect, 5000);
+      };
+
+      ws.onerror = () => {
+        setStatus(false, 'Connection error');
+      };
+    } catch (err) {
+      setStatus(false, 'Failed to connect — retrying...');
+      setTimeout(connect, 5000);
+    }
+  }
+
+  connect();
+</script>
+</body>
+</html>
