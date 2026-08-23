@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Arb Detector — Multi-Coin</title>
+<title>Arb Detector — Multi-Exchange</title>
 <style>
   :root {
     --bg: #0b0f14;
@@ -27,12 +27,12 @@
   }
   h1 { font-size: 18px; margin: 0 0 4px; }
   .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .statuses { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
   .status {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 13px;
-    margin-bottom: 16px;
+    font-size: 12px;
     padding: 6px 10px;
     border-radius: 999px;
     background: var(--panel);
@@ -63,7 +63,9 @@
     border-bottom: 1px solid var(--border);
   }
   .row:last-child { border-bottom: none; }
+  .row .left { display: flex; flex-direction: column; }
   .row .coin { color: var(--text); font-weight: 600; }
+  .row .exch { color: var(--muted); font-size: 11px; text-transform: uppercase; }
   .row .best { font-size: 15px; font-weight: 600; }
   .row .best.pos { color: var(--green); }
   .row .best.neg { color: var(--muted); }
@@ -84,6 +86,7 @@
     text-align: right;
     font-size: 13px;
   }
+  #table { max-height: 400px; overflow-y: auto; }
   #log, #debug {
     max-height: 220px;
     overflow-y: auto;
@@ -100,11 +103,12 @@
 <body>
 
   <h1>Triangular Arb Detector</h1>
-  <div class="sub" id="subtitle">KuCoin · scanning top coins · detection only</div>
+  <div class="sub">KuCoin + Binance + OKX · detection only, no trading</div>
 
-  <div class="status">
-    <div class="dot" id="statusDot"></div>
-    <span id="statusText">Discovering coins...</span>
+  <div class="statuses">
+    <div class="status"><div class="dot" id="dot-KUCOIN"></div><span>KuCoin: <span id="txt-KUCOIN">starting</span></span></div>
+    <div class="status"><div class="dot" id="dot-BINANCE"></div><span>Binance: <span id="txt-BINANCE">starting</span></span></div>
+    <div class="status"><div class="dot" id="dot-OKX"></div><span>OKX: <span id="txt-OKX">starting</span></span></div>
   </div>
 
   <div class="card">
@@ -118,13 +122,13 @@
       <input type="number" id="thresholdInput" value="0.05" step="0.01">
     </div>
     <div class="settings-row">
-      <span># of coins to scan</span>
-      <input type="number" id="coinCountInput" value="15" step="1" min="3" max="40">
+      <span># coins per exchange</span>
+      <input type="number" id="coinCountInput" value="10" step="1" min="3" max="30">
     </div>
   </div>
 
   <div class="card">
-    <h2>Best Spread Per Coin (via BTC, after fees, $1000 sim)</h2>
+    <h2>Best Spread — All Exchanges Combined (after fees, $1000 sim)</h2>
     <div id="table"><div class="empty">Waiting for data...</div></div>
   </div>
 
@@ -145,25 +149,23 @@
   const logEl = document.getElementById('log');
   const tableEl = document.getElementById('table');
   const debugEl = document.getElementById('debug');
-  const statusDot = document.getElementById('statusDot');
-  const statusText = document.getElementById('statusText');
-  const subtitle = document.getElementById('subtitle');
 
   let logCount = 0;
-  let ws = null;
-  let pingInterval = null;
-  let coins = [];
-  let pairs = [];
-  const book = {};
+  const book = {};              // "EXCHANGE|PAIR" -> { bid, ask }
+  const triangleList = [];      // [{ exchange, coin }]
+  const binanceSymbolMap = {};  // "BTCUSDT" -> { base, quote }
 
-  function debugLog(msg) {
+  function debugLog(source, msg) {
     const time = new Date().toLocaleTimeString();
-    debugEl.textContent = `[${time}] ${msg}\n` + debugEl.textContent;
+    debugEl.textContent = `[${time}][${source}] ${msg}\n` + debugEl.textContent;
+    while (debugEl.textContent.split('\n').length > 200) {
+      debugEl.textContent = debugEl.textContent.split('\n').slice(0, 200).join('\n');
+    }
   }
 
-  function setStatus(connected, text) {
-    statusDot.classList.toggle('on', connected);
-    statusText.textContent = text;
+  function setStatus(exchange, connected, text) {
+    document.getElementById(`dot-${exchange}`).classList.toggle('on', connected);
+    document.getElementById(`txt-${exchange}`).textContent = text;
   }
 
   function addLogEntry(text, isOpp) {
@@ -177,60 +179,12 @@
     while (logEl.children.length > 150) logEl.removeChild(logEl.lastChild);
   }
 
-  async function discoverCoins() {
-    debugLog('Fetching market data to discover coin list...');
-    const res = await fetch('/.netlify/functions/market-data');
-    const data = await res.json();
-    if (!data || !data.data || !data.data.ticker) throw new Error('Bad market-data response');
+  function bookKey(exchange, pair) { return `${exchange}|${pair}`; }
 
-    const usdtMap = {};
-    const btcMap = {};
-    data.data.ticker.forEach(t => {
-      if (!t.symbol) return;
-      if (t.symbol.endsWith('-USDT')) {
-        usdtMap[t.symbol.slice(0, -5)] = t;
-      } else if (t.symbol.endsWith('-BTC')) {
-        btcMap[t.symbol.slice(0, -4)] = t;
-      }
-    });
-
-    const candidates = Object.keys(usdtMap).filter(base => base !== 'BTC' && btcMap[base]);
-    candidates.sort((a, b) => parseFloat(usdtMap[b].volValue || 0) - parseFloat(usdtMap[a].volValue || 0));
-
-    const n = Math.max(3, Math.min(40, parseInt(coinCountInput.value) || 15));
-    const top = candidates.slice(0, n);
-    debugLog(`Found ${candidates.length} coins with both USDT+BTC markets, watching top ${top.length} by volume.`);
-    return top;
-  }
-
-  function buildTable() {
-    if (coins.length === 0) return;
-    tableEl.innerHTML = '';
-    const fee = parseFloat(feeInput.value) / 100;
-    const rows = coins.map(coin => {
-      const r = calcTriangle(coin, fee);
-      return { coin, ...r };
-    }).filter(r => r.best !== null);
-
-    rows.sort((a, b) => b.best - a.best);
-
-    if (rows.length === 0) {
-      tableEl.innerHTML = '<div class="empty">Waiting for price data...</div>';
-      return;
-    }
-
-    rows.forEach(r => {
-      const div = document.createElement('div');
-      div.className = 'row';
-      div.innerHTML = `<span class="coin">${r.coin}</span><span class="best ${r.best > 0 ? 'pos' : 'neg'}">${r.best.toFixed(4)}%</span>`;
-      tableEl.appendChild(div);
-    });
-  }
-
-  function calcTriangle(coin, fee) {
-    const btcUsdt = book['BTC-USDT'];
-    const coinUsdt = book[`${coin}-USDT`];
-    const coinBtc = book[`${coin}-BTC`];
+  function calcTriangle(exchange, coin, fee) {
+    const btcUsdt = book[bookKey(exchange, 'BTC-USDT')];
+    const coinUsdt = book[bookKey(exchange, `${coin}-USDT`)];
+    const coinBtc = book[bookKey(exchange, `${coin}-BTC`)];
     if (!btcUsdt || !coinUsdt || !coinBtc) return { best: null };
     if (!btcUsdt.bid || !coinUsdt.bid || !coinBtc.bid) return { best: null };
 
@@ -249,105 +203,286 @@
     return { pctA, pctB, best: Math.max(pctA, pctB), finalA, finalB };
   }
 
+  function buildTable() {
+    const fee = parseFloat(feeInput.value) / 100;
+    const rows = triangleList.map(({ exchange, coin }) => {
+      const r = calcTriangle(exchange, coin, fee);
+      return { exchange, coin, ...r };
+    }).filter(r => r.best !== null);
+
+    if (rows.length === 0) {
+      tableEl.innerHTML = '<div class="empty">Waiting for price data...</div>';
+      return;
+    }
+
+    rows.sort((a, b) => b.best - a.best);
+    tableEl.innerHTML = '';
+    rows.forEach(r => {
+      const div = document.createElement('div');
+      div.className = 'row';
+      div.innerHTML = `<span class="left"><span class="coin">${r.coin}</span><span class="exch">${r.exchange}</span></span><span class="best ${r.best > 0 ? 'pos' : 'neg'}">${r.best.toFixed(4)}%</span>`;
+      tableEl.appendChild(div);
+    });
+  }
+
   function checkAllTriangles() {
     const fee = parseFloat(feeInput.value) / 100;
     const threshold = parseFloat(thresholdInput.value);
-    coins.forEach(coin => {
-      const r = calcTriangle(coin, fee);
+    triangleList.forEach(({ exchange, coin }) => {
+      const r = calcTriangle(exchange, coin, fee);
       if (r.best === null) return;
       if (r.pctA > threshold) {
-        addLogEntry(`OPPORTUNITY ${coin} Path A (USDT→BTC→${coin}→USDT): ${r.pctA.toFixed(4)}% → $${r.finalA.toFixed(2)}`, true);
+        addLogEntry(`${exchange} ${coin} Path A (USDT→BTC→${coin}→USDT): ${r.pctA.toFixed(4)}% → $${r.finalA.toFixed(2)}`, true);
       }
       if (r.pctB > threshold) {
-        addLogEntry(`OPPORTUNITY ${coin} Path B (USDT→${coin}→BTC→USDT): ${r.pctB.toFixed(4)}% → $${r.finalB.toFixed(2)}`, true);
+        addLogEntry(`${exchange} ${coin} Path B (USDT→${coin}→BTC→USDT): ${r.pctB.toFixed(4)}% → $${r.finalB.toFixed(2)}`, true);
       }
     });
     buildTable();
   }
 
+  function topN() {
+    return Math.max(3, Math.min(30, parseInt(coinCountInput.value) || 10));
+  }
+
+  // ============== KUCOIN ==============
   async function getKucoinToken() {
     try {
-      debugLog('Trying direct connection to KuCoin...');
       const res = await fetch('https://api.kucoin.com/api/v1/bullet-public', { method: 'POST' });
       const data = await res.json();
-      if (data && data.data) { debugLog('Direct connection worked.'); return data.data; }
+      if (data && data.data) return data.data;
     } catch (err) {
-      debugLog('Direct blocked (CORS): ' + err.message);
+      debugLog('KUCOIN', 'Direct blocked (CORS): ' + err.message);
     }
-    debugLog('Trying serverless proxy (/.netlify/functions/token)...');
     const res = await fetch('/.netlify/functions/token', { method: 'POST' });
     const data = await res.json();
-    if (data && data.data) { debugLog('Serverless proxy worked.'); return data.data; }
-    throw new Error('Unexpected token response: ' + JSON.stringify(data).slice(0, 100));
+    if (data && data.data) return data.data;
+    throw new Error('Unexpected token response');
   }
 
-  async function connect() {
-    setStatus(false, 'Connecting...');
-    try {
-      if (coins.length === 0) {
-        coins = await discoverCoins();
-        pairs = ['BTC-USDT'];
-        coins.forEach(c => { pairs.push(`${c}-USDT`); pairs.push(`${c}-BTC`); });
-        pairs.forEach(p => { book[p] = { bid: null, ask: null }; });
-        subtitle.textContent = `KuCoin · scanning ${coins.length} coins · detection only`;
+  async function discoverKucoin() {
+    debugLog('KUCOIN', 'Discovering coins...');
+    const res = await fetch('/.netlify/functions/market-data');
+    const data = await res.json();
+    const usdtMap = {}, btcMap = {};
+    data.data.ticker.forEach(t => {
+      if (!t.symbol) return;
+      if (t.symbol.endsWith('-USDT')) usdtMap[t.symbol.slice(0, -5)] = t;
+      else if (t.symbol.endsWith('-BTC')) btcMap[t.symbol.slice(0, -4)] = t;
+    });
+    const candidates = Object.keys(usdtMap).filter(b => b !== 'BTC' && btcMap[b]);
+    candidates.sort((a, b) => parseFloat(usdtMap[b].volValue || 0) - parseFloat(usdtMap[a].volValue || 0));
+    const top = candidates.slice(0, topN());
+    debugLog('KUCOIN', `Watching ${top.length} coins.`);
+    return top;
+  }
+
+  async function runKucoin() {
+    while (true) {
+      setStatus('KUCOIN', false, 'connecting...');
+      try {
+        const coins = await discoverKucoin();
+        coins.forEach(c => triangleList.push({ exchange: 'KUCOIN', coin: c }));
+        const pairs = ['BTC-USDT', ...coins.flatMap(c => [`${c}-USDT`, `${c}-BTC`])];
+        pairs.forEach(p => { book[bookKey('KUCOIN', p)] = { bid: null, ask: null }; });
+
+        const { token, instanceServers } = await getKucoinToken();
+        const wsUrl = `${instanceServers[0].endpoint}?token=${token}`;
+        await new Promise((resolve) => {
+          const ws = new WebSocket(wsUrl);
+          let pingInterval;
+          ws.onopen = () => {
+            debugLog('KUCOIN', 'Connected.');
+            setStatus('KUCOIN', true, 'live');
+            const batchSize = 10;
+            for (let i = 0; i < pairs.length; i += batchSize) {
+              const batch = pairs.slice(i, i + batchSize);
+              ws.send(JSON.stringify({ id: Date.now() + i, type: 'subscribe', topic: `/market/ticker:${batch.join(',')}`, privateChannel: false, response: true }));
+            }
+            pingInterval = setInterval(() => { if (ws.readyState === 1) ws.send(JSON.stringify({ id: Date.now(), type: 'ping' })); }, 20000);
+          };
+          ws.onmessage = (event) => {
+            let msg; try { msg = JSON.parse(event.data); } catch { return; }
+            if (msg.type !== 'message' || !msg.topic) return;
+            const pair = msg.topic.split(':')[1];
+            const key = bookKey('KUCOIN', pair);
+            if (book[key] && msg.data) {
+              book[key].bid = parseFloat(msg.data.bestBid);
+              book[key].ask = parseFloat(msg.data.bestAsk);
+              checkAllTriangles();
+            }
+          };
+          ws.onclose = () => { debugLog('KUCOIN', 'Closed.'); setStatus('KUCOIN', false, 'reconnecting...'); clearInterval(pingInterval); resolve(); };
+          ws.onerror = () => { debugLog('KUCOIN', 'WS error.'); };
+        });
+      } catch (err) {
+        debugLog('KUCOIN', 'Fatal: ' + err.message);
+        setStatus('KUCOIN', false, 'retrying...');
       }
-
-      const { token, instanceServers } = await getKucoinToken();
-      const wsUrl = `${instanceServers[0].endpoint}?token=${token}`;
-      debugLog(`Got token, opening WebSocket for ${pairs.length} pairs...`);
-
-      ws = new WebSocket(wsUrl);
-
-      ws.onopen = () => {
-        debugLog('WebSocket connected.');
-        setStatus(true, 'Live');
-        const batchSize = 10;
-        for (let i = 0; i < pairs.length; i += batchSize) {
-          const batch = pairs.slice(i, i + batchSize);
-          ws.send(JSON.stringify({
-            id: Date.now() + i,
-            type: 'subscribe',
-            topic: `/market/ticker:${batch.join(',')}`,
-            privateChannel: false,
-            response: true,
-          }));
-        }
-        pingInterval = setInterval(() => {
-          if (ws.readyState === 1) ws.send(JSON.stringify({ id: Date.now(), type: 'ping' }));
-        }, 20000);
-      };
-
-      ws.onmessage = (event) => {
-        let msg;
-        try { msg = JSON.parse(event.data); } catch { return; }
-        if (msg.type !== 'message' || !msg.topic) return;
-        const pair = msg.topic.split(':')[1];
-        if (book[pair] && msg.data) {
-          book[pair].bid = parseFloat(msg.data.bestBid);
-          book[pair].ask = parseFloat(msg.data.bestAsk);
-          checkAllTriangles();
-        }
-      };
-
-      ws.onclose = () => {
-        debugLog('WebSocket closed.');
-        setStatus(false, 'Reconnecting...');
-        clearInterval(pingInterval);
-        setTimeout(connect, 5000);
-      };
-
-      ws.onerror = () => {
-        debugLog('WebSocket error.');
-        setStatus(false, 'Connection error');
-      };
-    } catch (err) {
-      debugLog('Fatal: ' + err.message);
-      setStatus(false, 'Failed to connect — retrying...');
-      setTimeout(connect, 5000);
+      await new Promise(r => setTimeout(r, 5000));
     }
   }
 
-  connect();
+  // ============== BINANCE ==============
+  async function fetchBinanceRaw() {
+    try {
+      const [exInfoRes, tickerRes] = await Promise.all([
+        fetch('https://api.binance.com/api/v3/exchangeInfo'),
+        fetch('https://api.binance.com/api/v3/ticker/24hr'),
+      ]);
+      const exInfo = await exInfoRes.json();
+      const tickers = await tickerRes.json();
+      return { symbols: exInfo.symbols, tickers };
+    } catch (err) {
+      debugLog('BINANCE', 'Direct blocked, using fallback: ' + err.message);
+      const res = await fetch('/.netlify/functions/binance-market');
+      return await res.json();
+    }
+  }
+
+  async function discoverBinance() {
+    debugLog('BINANCE', 'Discovering coins...');
+    const { symbols, tickers } = await fetchBinanceRaw();
+    const usdtBase = new Set(), btcBase = new Set();
+    symbols.forEach(s => {
+      if (s.status !== 'TRADING') return;
+      binanceSymbolMap[s.symbol] = { base: s.baseAsset, quote: s.quoteAsset };
+      if (s.quoteAsset === 'USDT') usdtBase.add(s.baseAsset);
+      if (s.quoteAsset === 'BTC') btcBase.add(s.baseAsset);
+    });
+    const candidates = [...usdtBase].filter(b => b !== 'BTC' && btcBase.has(b));
+    const volMap = {};
+    tickers.forEach(t => { volMap[t.symbol] = parseFloat(t.quoteVolume || 0); });
+    candidates.sort((a, b) => (volMap[`${b}USDT`] || 0) - (volMap[`${a}USDT`] || 0));
+    const top = candidates.slice(0, topN());
+    debugLog('BINANCE', `Watching ${top.length} coins.`);
+    return top;
+  }
+
+  async function runBinance() {
+    while (true) {
+      setStatus('BINANCE', false, 'connecting...');
+      try {
+        const coins = await discoverBinance();
+        coins.forEach(c => triangleList.push({ exchange: 'BINANCE', coin: c }));
+        const pairsLower = ['btcusdt', ...coins.flatMap(c => [`${c.toLowerCase()}usdt`, `${c.toLowerCase()}btc`])];
+        pairsLower.forEach(p => {
+          // seed book entries using human pair form
+        });
+        book[bookKey('BINANCE', 'BTC-USDT')] = { bid: null, ask: null };
+        coins.forEach(c => {
+          book[bookKey('BINANCE', `${c}-USDT`)] = { bid: null, ask: null };
+          book[bookKey('BINANCE', `${c}-BTC`)] = { bid: null, ask: null };
+        });
+
+        const streamsParam = pairsLower.map(p => `${p}@bookTicker`).join('/');
+        await new Promise((resolve) => {
+          const ws = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streamsParam}`);
+          ws.onopen = () => { debugLog('BINANCE', 'Connected.'); setStatus('BINANCE', true, 'live'); };
+          ws.onmessage = (event) => {
+            let msg; try { msg = JSON.parse(event.data); } catch { return; }
+            const d = msg.data;
+            if (!d || !d.s) return;
+            const map = binanceSymbolMap[d.s];
+            if (!map) return;
+            const key = bookKey('BINANCE', `${map.base}-${map.quote}`);
+            if (book[key]) {
+              book[key].bid = parseFloat(d.b);
+              book[key].ask = parseFloat(d.a);
+              checkAllTriangles();
+            }
+          };
+          ws.onclose = () => { debugLog('BINANCE', 'Closed.'); setStatus('BINANCE', false, 'reconnecting...'); resolve(); };
+          ws.onerror = () => { debugLog('BINANCE', 'WS error.'); };
+        });
+      } catch (err) {
+        debugLog('BINANCE', 'Fatal: ' + err.message);
+        setStatus('BINANCE', false, 'retrying...');
+      }
+      await new Promise(r => setTimeout(r, 5000));
+    }
+  }
+
+  // ============== OKX ==============
+  async function fetchOkxRaw() {
+    try {
+      const res = await fetch('https://www.okx.com/api/v5/market/tickers?instType=SPOT');
+      const data = await res.json();
+      return data.data;
+    } catch (err) {
+      debugLog('OKX', 'Direct blocked, using fallback: ' + err.message);
+      const res = await fetch('/.netlify/functions/okx-market');
+      const data = await res.json();
+      return data.data;
+    }
+  }
+
+  async function discoverOkx() {
+    debugLog('OKX', 'Discovering coins...');
+    const tickers = await fetchOkxRaw();
+    const usdtMap = {}, btcMap = {};
+    tickers.forEach(t => {
+      if (!t.instId) return;
+      const [base, quote] = t.instId.split('-');
+      if (quote === 'USDT') usdtMap[base] = t;
+      if (quote === 'BTC') btcMap[base] = t;
+    });
+    const candidates = Object.keys(usdtMap).filter(b => b !== 'BTC' && btcMap[b]);
+    candidates.sort((a, b) => parseFloat(usdtMap[b].volCcy24h || 0) - parseFloat(usdtMap[a].volCcy24h || 0));
+    const top = candidates.slice(0, topN());
+    debugLog('OKX', `Watching ${top.length} coins.`);
+    return top;
+  }
+
+  async function runOkx() {
+    while (true) {
+      setStatus('OKX', false, 'connecting...');
+      try {
+        const coins = await discoverOkx();
+        coins.forEach(c => triangleList.push({ exchange: 'OKX', coin: c }));
+        book[bookKey('OKX', 'BTC-USDT')] = { bid: null, ask: null };
+        coins.forEach(c => {
+          book[bookKey('OKX', `${c}-USDT`)] = { bid: null, ask: null };
+          book[bookKey('OKX', `${c}-BTC`)] = { bid: null, ask: null };
+        });
+
+        const instIds = ['BTC-USDT', ...coins.flatMap(c => [`${c}-USDT`, `${c}-BTC`])];
+        await new Promise((resolve) => {
+          const ws = new WebSocket('wss://ws.okx.com:8443/ws/v5/public');
+          let pingInterval;
+          ws.onopen = () => {
+            debugLog('OKX', 'Connected.');
+            setStatus('OKX', true, 'live');
+            const args = instIds.map(id => ({ channel: 'tickers', instId: id }));
+            ws.send(JSON.stringify({ op: 'subscribe', args }));
+            pingInterval = setInterval(() => { if (ws.readyState === 1) ws.send('ping'); }, 20000);
+          };
+          ws.onmessage = (event) => {
+            if (event.data === 'pong') return;
+            let msg; try { msg = JSON.parse(event.data); } catch { return; }
+            if (!msg.arg || msg.arg.channel !== 'tickers' || !msg.data || !msg.data[0]) return;
+            const t = msg.data[0];
+            const key = bookKey('OKX', t.instId);
+            if (book[key]) {
+              book[key].bid = parseFloat(t.bidPx);
+              book[key].ask = parseFloat(t.askPx);
+              checkAllTriangles();
+            }
+          };
+          ws.onclose = () => { debugLog('OKX', 'Closed.'); setStatus('OKX', false, 'reconnecting...'); clearInterval(pingInterval); resolve(); };
+          ws.onerror = () => { debugLog('OKX', 'WS error.'); };
+        });
+      } catch (err) {
+        debugLog('OKX', 'Fatal: ' + err.message);
+        setStatus('OKX', false, 'retrying...');
+      }
+      await new Promise(r => setTimeout(r, 5000));
+    }
+  }
+
+  runKucoin();
+  runBinance();
+  runOkx();
 </script>
 </body>
 </html>
