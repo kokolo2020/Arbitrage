@@ -1,4 +1,4 @@
-const COINS = ['BTC','ETH','BNB','XRP','SOL','TRX','DOGE','ADA','BCH','LINK','AVAX','XLM','SUI','HBAR','LTC','DOT','UNI','AAVE','NEAR','ETC'];
+const COINS = ['BTC','ETH','BNB','XRP','SOL','TRX','DOGE','ADA','BCH','LINK','AVAX','XLM','SUI','HBAR','LTC','DOT','UNI','AAVE','NEAR','ETC','FIL','ICP','ATOM','ALGO','VET','IMX','OP','ARB','INJ','RENDER','TON','PEPE','SHIB','WIF','BONK','FLOKI','SEI','TIA','FET','GRT','MKR','CRV','LDO','EOS','THETA','SAND','MANA','AXS','APT','STX'];
 
 const timeoutFetch = async (url, ms = 7000) => {
   const controller = new AbortController();
@@ -34,7 +34,6 @@ const n = value => {
 
 exports.handler = async () => {
   const started = Date.now();
-
   const requests = [
     firstSuccess([
       'https://data-api.binance.vision/api/v3/ticker/bookTicker',
@@ -64,9 +63,7 @@ exports.handler = async () => {
     status.binance = Object.keys(exchanges.binance).length ? 'ok' : 'error';
     sources.binance = results[0].value.source;
     if (status.binance !== 'ok') errors.binance = 'No requested USDT markets returned';
-  } else {
-    errors.binance = results[0].reason?.message || 'Unavailable';
-  }
+  } else errors.binance = results[0].reason?.message || 'Unavailable';
 
   if (results[1].status === 'fulfilled' && Array.isArray(results[1].value.data?.data?.ticker)) {
     const map = new Map(results[1].value.data.data.ticker.map(t => [t.symbol, t]));
@@ -76,9 +73,7 @@ exports.handler = async () => {
     }
     status.kucoin = Object.keys(exchanges.kucoin).length ? 'ok' : 'error';
     sources.kucoin = results[1].value.source;
-  } else {
-    errors.kucoin = results[1].reason?.message || 'Unavailable';
-  }
+  } else errors.kucoin = results[1].reason?.message || 'Unavailable';
 
   if (results[2].status === 'fulfilled' && Array.isArray(results[2].value.data?.data)) {
     const map = new Map(results[2].value.data.data.map(t => [String(t.symbol || '').toUpperCase(), t]));
@@ -88,9 +83,7 @@ exports.handler = async () => {
     }
     status.htx = Object.keys(exchanges.htx).length ? 'ok' : 'error';
     sources.htx = results[2].value.source;
-  } else {
-    errors.htx = results[2].reason?.message || 'Unavailable';
-  }
+  } else errors.htx = results[2].reason?.message || 'Unavailable';
 
   return {
     statusCode: 200,
@@ -99,14 +92,6 @@ exports.handler = async () => {
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
       'access-control-allow-origin': '*'
     },
-    body: JSON.stringify({
-      coins: COINS,
-      exchanges,
-      status,
-      errors,
-      sources,
-      timestamp: Date.now(),
-      latencyMs: Date.now() - started
-    })
+    body: JSON.stringify({ coins: COINS, exchanges, status, errors, sources, timestamp: Date.now(), latencyMs: Date.now() - started })
   };
 };
