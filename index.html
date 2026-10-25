@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Arbitrage Scanner</title>
+<style>
+:root{--bg:#07101b;--p:#101b2b;--l:#263750;--t:#f5f8fc;--m:#8fa0b8;--g:#22d17e;--r:#ff6170;--y:#f4c84b;--b:#55a7ff}
+@media (prefers-color-scheme:light){:root{--bg:#f4f6fa;--p:#fff;--l:#d5dce8;--t:#14202f;--m:#586579;--g:#0a8a50;--r:#c62839;--y:#9a7000;--b:#1f66c0}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--t);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.app{max-width:1000px;margin:auto;padding:14px 16px 60px}
+h1{font-size:22px;margin:0}.sub{color:var(--m);font-size:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.panel{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:12px;margin-top:10px}
+.chip{border:1px solid var(--l);border-radius:999px;padding:4px 10px;font-size:12px;color:var(--m)}
+.chip.ok{color:var(--g)}.chip.bad{color:var(--r)}
+button,input{font:inherit}button{background:var(--p);color:var(--t);border:1px solid var(--l);border-radius:8px;padding:8px 12px;cursor:pointer;min-height:38px}
+button.pri{background:var(--b);border-color:var(--b);color:#fff}
+label{font-size:12px;color:var(--m);display:flex;gap:6px;align-items:center}
+input[type=number]{width:70px;background:transparent;border:1px solid var(--l);border-radius:6px;color:var(--t);padding:6px;text-align:right}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}
+.stat .v{font-size:20px;font-weight:800}.stat .k{font-size:11px;color:var(--m)}
+table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:right;padding:6px 4px;border-bottom:1px solid var(--l)}th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+h2{font-size:14px;margin:0 0 6px}.good{color:var(--g)}.bad{color:var(--r)}.note{font-size:12px;color:var(--m);margin-top:6px}
+.scroll{overflow-x:auto}
+</style></head><body><div class="app">
+<h1>Arbitrage Scanner</h1>
+<div class="sub">Detection only. No keys, no orders, no money moves. Prices come straight from the exchanges' public feeds into this browser tab.</div>
+<div class="panel row">
+ <button class="pri" id="go">Start</button><button id="csv">Download log (CSV)</button>
+ <label>Fee per trade % <input type="number" id="fee" value="0.10" step="0.01" min="0"></label>
+ <label>Poll seconds <input type="number" id="poll" value="3" step="1" min="2"></label>
+ <span id="chips" class="row"></span>
+</div>
+<div class="panel"><div class="stats" id="stats"></div>
+ <div class="note">The question this answers: does any gap survive fees, and for how long? "Positive polls" counts scans where at least one route stayed above zero after fees.</div></div>
+<div class="panel"><h2>Triangular (one exchange, USDT to BTC/ETH to coin and back)</h2><div class="scroll"><table id="tri"></table></div></div>
+<div class="panel"><h2>Cross-exchange (buy on one, sell on another)</h2><div class="scroll"><table id="xt"></table></div>
+ <div class="note">Needs money already on both exchanges. Transfers, withdrawal fees and price movement between the two feeds are not modelled, so a positive number here is an upper bound.</div></div>
+<div class="panel"><h2>Positive routes seen (closed events)</h2><div class="scroll"><table id="ev"></table></div></div>
+<div class="note">Not financial advice. Real fills depend on depth, speed and your fee tier; this page reads top of book only.</div>
+<script src="scan.js"></script>
+<script>
+(function(){
+var $=function(i){return document.getElementById(i)};
+function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+var U=Scan.UNIVERSE, QS=['USDT','BTC','ETH'], tracker=new Scan.Tracker(), timer=null, running=false, books={}, status={};
+var bnMap={}; U.forEach(function(b){QS.forEach(function(q){bnMap[b+q]=b+'-'+q})});
+function num(x){var v=parseFloat(x);return isFinite(v)?v:0}
+function getJSON(url,ms){var c=new AbortController(),t=setTimeout(function(){c.abort()},ms);return fetch(url,{signal:c.signal,cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).finally(function(){clearTimeout(t)})}
+var FEEDS={
+ OKX:function(){return getJSON('https://www.okx.com/api/v5/market/tickers?instType=SPOT',6000).then(function(j){var b={};(j.data||[]).forEach(function(d){var s=d.instId.split('-');if(U.indexOf(s[0])<0||QS.indexOf(s[1])<0)return;b[d.instId]={bid:num(d.bidPx),ask:num(d.askPx),bidSz:num(d.bidSz),askSz:num(d.askSz)}});return b})},
+ Binance:function(){return getJSON('https://api.binance.com/api/v3/ticker/bookTicker',6000).then(function(a){var b={};a.forEach(function(d){var p=bnMap[d.symbol];if(p)b[p]={bid:num(d.bidPrice),ask:num(d.askPrice),bidSz:num(d.bidQty),askSz:num(d.askQty)}});return b})},
+ KuCoin:function(){return getJSON('https://api.kucoin.com/api/v1/market/allTickers',6000).then(function(j){var b={};((j.data&&j.data.ticker)||[]).forEach(function(d){var s=d.symbol.split('-');if(U.indexOf(s[0])<0||QS.indexOf(s[1])<0)return;b[d.symbol]={bid:num(d.buy),ask:num(d.sell),bidSz:0,askSz:0}});return b})}
+};
+function fmt(x,d){return (x>=0?'+':'')+x.toFixed(d)+'%'}
+function cls(x){return x>0?'good':(x<-0.5?'bad':'')}
+function size(s){return s===null||s===undefined?'n/a':'$'+Math.round(s).toLocaleString()}
+function table(el,head,rows){el.innerHTML='<tr>'+head.map(function(h){return '<th>'+h+'</th>'}).join('')+'</tr>'+rows.join('')}
+function render(opps){
+ var tri=opps.filter(function(o){return o.kind==='tri'}).sort(function(a,b){return b.net-a.net}).slice(0,10);
+ var xs=opps.filter(function(o){return o.kind==='x'}).sort(function(a,b){return b.net-a.net}).slice(0,10);
+ var row=function(o){return '<tr><td>'+esc(o.ex)+'</td><td>'+esc(o.route)+'</td><td>'+fmt(o.gross,3)+'</td><td class="'+cls(o.net)+'">'+fmt(o.net,3)+'</td><td>'+size(o.size)+'</td></tr>'};
+ var head=['Exchange','Route','Before fees','After fees','Top-of-book size'];
+ table($('tri'),head,tri.map(row)); table($('xt'),head,xs.map(row));
+ var ev=tracker.events.slice(-15).reverse().map(function(e){return '<tr><td>'+new Date(e.time).toLocaleTimeString()+'</td><td>'+esc(e.ex+' '+e.route)+'</td><td class="good">'+fmt(e.peak,3)+'</td><td>'+e.seconds+'s</td><td>'+size(e.size)+'</td></tr>'});
+ table($('ev'),['Time','Route','Peak after fees','Lasted','Size'],ev);
+ var t=tracker, best=t.bestNet===-Infinity?'n/a':fmt(t.bestNet,3);
+ var evs=t.events.length+Object.keys(t.active).length;
+ $('stats').innerHTML=[['Scans',t.polls],['Routes checked',t.evaluated.toLocaleString()],['Positive scans',t.positivePolls+' ('+(t.polls?Math.round(100*t.positivePolls/t.polls):0)+'%)'],['Positive events',evs],['Best after fees',best]].map(function(s){return '<div class="stat"><div class="v">'+esc(s[1])+'</div><div class="k">'+esc(s[0])+'</div></div>'}).join('');
+}
+function chips(){$('chips').innerHTML=Scan.EXCHANGES.map(function(e){var s=status[e]||{};return '<span class="chip '+(s.ok?'ok':(s.err?'bad':''))+'">'+e+': '+esc(s.ok?s.ms+' ms':(s.err||'waiting'))+'</span>'}).join('')}
+function tick(){
+ var fee=Math.max(0,num($('fee').value))/100, ms=Math.max(2,num($('poll').value))*1000;
+ return Promise.all(Scan.EXCHANGES.map(function(e){var t0=performance.now();return FEEDS[e]().then(function(b){books[e]=b;status[e]={ok:true,ms:Math.round(performance.now()-t0)}}).catch(function(err){status[e]={err:(err&&err.name==='AbortError')?'timeout':(err&&err.message==='Failed to fetch'?'blocked (CORS/network)':String(err&&err.message||err))}})})).then(function(){
+  var opps=[];Scan.EXCHANGES.forEach(function(e){if(status[e]&&status[e].ok)opps=opps.concat(Scan.triangular(e,books[e],fee,U))});
+  var live={};Scan.EXCHANGES.forEach(function(e){if(status[e]&&status[e].ok)live[e]=books[e]});
+  if(Object.keys(live).length>1)opps=opps.concat(Scan.cross(live,fee,U));
+  tracker.update(opps,ms,Date.now());chips();render(opps);
+ });
+}
+function loop(){if(!running)return;var ms=Math.max(2,num($('poll').value))*1000;tick().finally(function(){if(running)timer=setTimeout(loop,ms)})}
+$('go').onclick=function(){running=!running;$('go').textContent=running?'Pause':'Start';if(running)loop();else clearTimeout(timer)};
+$('csv').onclick=function(){
+ var rows=[['time','kind','exchange','route','peak_after_fees_pct','seconds','top_of_book_usd']].concat(tracker.events.map(function(e){return [new Date(e.time).toISOString(),e.kind,e.ex,e.route,e.peak.toFixed(4),e.seconds,e.size===null?'':Math.round(e.size)]}));
+ var csv=rows.map(function(r){return r.map(function(c){return '"'+String(c).replace(/"/g,'""')+'"'}).join(',')}).join('\n');
+ var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='arb-log.csv';a.click();
+};
+chips();render([]);
+})();
+</script></div></body></html>
