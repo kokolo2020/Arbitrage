@@ -45,10 +45,42 @@ var U=Scan.UNIVERSE, QS=['USDT','BTC','ETH'], tracker=new Scan.Tracker(), timer=
 var bnMap={}; U.forEach(function(b){QS.forEach(function(q){bnMap[b+q]=b+'-'+q})});
 function num(x){var v=parseFloat(x);return isFinite(v)?v:0}
 function getJSON(url,ms){var c=new AbortController(),t=setTimeout(function(){c.abort()},ms);return fetch(url,{signal:c.signal,cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).finally(function(){clearTimeout(t)})}
+var WS={};
+function pairsToWatch(){var ids=[];U.forEach(function(b){QS.forEach(function(q){if(b!==q)ids.push(b+'-'+q)})});return ids}
+function startWS(name,connect){
+ var L=WS[name]=WS[name]||{book:{},last:0,n:0,err:null,timers:[]};
+ if(L.on)return; L.on=true;
+ function open(){
+  L.err=null;L.timers.forEach(clearTimeout);L.timers.forEach(clearInterval);L.timers=[];
+  connect(L,function(err){L.err=err},function(){L.on=false;if(running)setTimeout(function(){if(!L.on){L.on=true;open()}},4000)});
+ }
+ open();
+}
+function connectOKX(L,fail,closed){
+ var ws;try{ws=new WebSocket('wss://ws.okx.com:8443/ws/v5/public')}catch(e){fail('websocket blocked');closed();return}
+ ws.onopen=function(){var ids=pairsToWatch();ids.forEach(function(id,i){L.timers.push(setTimeout(function(){try{ws.send(JSON.stringify({op:'subscribe',args:[{channel:'tickers',instId:id}]}))}catch(e){}},i*350))});L.timers.push(setInterval(function(){try{ws.send('ping')}catch(e){}},20000))};
+ ws.onmessage=function(ev){if(ev.data==='pong')return;var m;try{m=JSON.parse(ev.data)}catch(e){return}
+  if(m.data&&m.arg&&m.arg.channel==='tickers'){m.data.forEach(function(d){if(num(d.bidPx)>0&&num(d.askPx)>0){if(!L.book[d.instId])L.n++;L.book[d.instId]={bid:num(d.bidPx),ask:num(d.askPx),bidSz:num(d.bidSz),askSz:num(d.askSz)}}});L.last=Date.now()}};
+ ws.onerror=function(){fail('websocket blocked')};ws.onclose=function(){closed()};
+}
+function connectKuCoin(L,fail,closed){
+ fetch('https://api.kucoin.com/api/v1/bullet-public',{method:'POST'}).then(function(r){return r.json()}).then(function(j){
+  var srv=j.data.instanceServers[0],ws=new WebSocket(srv.endpoint+'?token='+encodeURIComponent(j.data.token)+'&connectId='+Date.now()),id=1;
+  ws.onopen=function(){var ids=pairsToWatch();ids.forEach(function(sym,i){L.timers.push(setTimeout(function(){try{ws.send(JSON.stringify({id:id++,type:'subscribe',topic:'/market/ticker:'+sym,response:false}))}catch(e){}},i*150))});L.timers.push(setInterval(function(){try{ws.send(JSON.stringify({id:id++,type:'ping'}))}catch(e){}},Math.max(5000,(srv.pingInterval||18000)-3000)))};
+  ws.onmessage=function(ev){var m;try{m=JSON.parse(ev.data)}catch(e){return}
+   if(m.type==='message'&&m.topic&&m.data){var sym=m.topic.split(':')[1],d=m.data;if(num(d.bestBid)>0&&num(d.bestAsk)>0){if(!L.book[sym])L.n++;L.book[sym]={bid:num(d.bestBid),ask:num(d.bestAsk),bidSz:num(d.bestBidSize),askSz:num(d.bestAskSize)};L.last=Date.now()}}};
+  ws.onerror=function(){fail('websocket blocked')};ws.onclose=function(){closed()};
+ }).catch(function(){fail('blocked (token request)');closed()});
+}
+function wsBook(name,connect){
+ startWS(name,connect);var L=WS[name];
+ if(L.last&&Date.now()-L.last<20000)return Promise.resolve({book:L.book,text:'live ws, '+L.n+' pairs'});
+ return Promise.reject(new Error(L.err||(L.last?'stale feed':'connecting... (up to 1 min)')));
+}
 var FEEDS={
- OKX:function(){return getJSON('https://www.okx.com/api/v5/market/tickers?instType=SPOT',6000).then(function(j){var b={};(j.data||[]).forEach(function(d){var s=d.instId.split('-');if(U.indexOf(s[0])<0||QS.indexOf(s[1])<0)return;b[d.instId]={bid:num(d.bidPx),ask:num(d.askPx),bidSz:num(d.bidSz),askSz:num(d.askSz)}});return b})},
- Binance:function(){return getJSON('https://api.binance.com/api/v3/ticker/bookTicker',6000).then(function(a){var b={};a.forEach(function(d){var p=bnMap[d.symbol];if(p)b[p]={bid:num(d.bidPrice),ask:num(d.askPrice),bidSz:num(d.bidQty),askSz:num(d.askQty)}});return b})},
- KuCoin:function(){return getJSON('https://api.kucoin.com/api/v1/market/allTickers',6000).then(function(j){var b={};((j.data&&j.data.ticker)||[]).forEach(function(d){var s=d.symbol.split('-');if(U.indexOf(s[0])<0||QS.indexOf(s[1])<0)return;b[d.symbol]={bid:num(d.buy),ask:num(d.sell),bidSz:0,askSz:0}});return b})}
+ OKX:function(){return wsBook('OKX',connectOKX)},
+ Binance:function(){return getJSON('https://api.binance.com/api/v3/ticker/bookTicker',6000).then(function(a){var b={};a.forEach(function(d){var p=bnMap[d.symbol];if(p)b[p]={bid:num(d.bidPrice),ask:num(d.askPrice),bidSz:num(d.bidQty),askSz:num(d.askQty)}});return {book:b}})},
+ KuCoin:function(){return wsBook('KuCoin',connectKuCoin)}
 };
 function fmt(x,d){return (x>=0?'+':'')+x.toFixed(d)+'%'}
 function cls(x){return x>0?'good':(x<-0.5?'bad':'')}
@@ -66,10 +98,10 @@ function render(opps){
  var evs=t.events.length+Object.keys(t.active).length;
  $('stats').innerHTML=[['Scans',t.polls],['Routes checked',t.evaluated.toLocaleString()],['Positive scans',t.positivePolls+' ('+(t.polls?Math.round(100*t.positivePolls/t.polls):0)+'%)'],['Positive events',evs],['Best after fees',best]].map(function(s){return '<div class="stat"><div class="v">'+esc(s[1])+'</div><div class="k">'+esc(s[0])+'</div></div>'}).join('');
 }
-function chips(){$('chips').innerHTML=Scan.EXCHANGES.map(function(e){var s=status[e]||{};return '<span class="chip '+(s.ok?'ok':(s.err?'bad':''))+'">'+e+': '+esc(s.ok?s.ms+' ms':(s.err||'waiting'))+'</span>'}).join('')}
+function chips(){$('chips').innerHTML=Scan.EXCHANGES.map(function(e){var s=status[e]||{};return '<span class="chip '+(s.ok?'ok':(s.err?'bad':''))+'">'+e+': '+esc(s.ok?(s.text||s.ms+' ms'):(s.err||'waiting'))+'</span>'}).join('')}
 function tick(){
  var fee=Math.max(0,num($('fee').value))/100, ms=Math.max(2,num($('poll').value))*1000;
- return Promise.all(Scan.EXCHANGES.map(function(e){var t0=performance.now();return FEEDS[e]().then(function(b){books[e]=b;status[e]={ok:true,ms:Math.round(performance.now()-t0)}}).catch(function(err){status[e]={err:(err&&err.name==='AbortError')?'timeout':(err&&err.message==='Failed to fetch'?'blocked (CORS/network)':String(err&&err.message||err))}})})).then(function(){
+ return Promise.all(Scan.EXCHANGES.map(function(e){var t0=performance.now();return FEEDS[e]().then(function(r){books[e]=r.book;status[e]={ok:true,ms:Math.round(performance.now()-t0),text:r.text}}).catch(function(err){status[e]={err:(err&&err.name==='AbortError')?'timeout':(err&&err.message==='Failed to fetch'?'blocked (CORS/network)':String(err&&err.message||err)),connecting:/connecting/.test(String(err&&err.message))}})})).then(function(){
   var opps=[];Scan.EXCHANGES.forEach(function(e){if(status[e]&&status[e].ok)opps=opps.concat(Scan.triangular(e,books[e],fee,U))});
   var live={};Scan.EXCHANGES.forEach(function(e){if(status[e]&&status[e].ok)live[e]=books[e]});
   if(Object.keys(live).length>1)opps=opps.concat(Scan.cross(live,fee,U));
